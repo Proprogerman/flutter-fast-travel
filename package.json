@@ -1,0 +1,88 @@
+{
+  "name": "flutter-code-jumper",
+  "displayName": "Flutter Code Jumper",
+  "description": "Effortlessly navigate and edit Flutter widget trees with intuitive keyboard shortcuts for seamless coding.",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.60.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onLanguage:dart",
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "flutter-code-jumper.test",
+        "title": "Test Flutter Code Jumper"
+      },
+      {
+        "command": "flutter-code-jumper.enterWidget",
+        "title": "Enter Widget"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "flutter-code-jumper.navigateToParent",
+        "key": "ctrl+[",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "flutter-code-jumper.navigateToChild",
+        "key": "ctrl+]",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "flutter-code-jumper.navigateNextParam",
+        "key": "ctrl+=",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "flutter-code-jumper.navigatePrevParam",
+        "key": "ctrl+-",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "flutter-code-jumper.selectCurrentBlock",
+        "key": "ctrl+a",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "flutter-code-jumper.enterWidget",
+        "key": "ctrl+enter",
+        "when": "editorTextFocus && editorLangId == dart"
+      }
+    ]
+  },
+  "main": "./out/extension.js",
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts",
+    "test": "node ./out/test/runTest.js"
+  },
+  "dependencies": {
+    "@dart-code/analysis-server-types": "^0.3.2",
+    "vscode-languageclient": "^8.1.0",
+    "vscode-languageserver": "^8.1.0",
+    "vscode-languageserver-protocol": "^3.17.3"
+  },
+  "devDependencies": {
+    "@types/node": "^16.x",
+    "@types/vscode": "^1.73.0",
+    "@types/glob": "^8.1.0",
+    "@types/mocha": "^10.0.1",
+    "@typescript-eslint/eslint-plugin": "^5.59.1",
+    "@typescript-eslint/parser": "^5.59.1",
+    "@vscode/test-electron": "^2.3.8",
+    "eslint": "^8.39.0",
+    "glob": "^8.1.0",
+    "mocha": "^10.2.0",
+    "typescript": "^5.0.4"
+  }
+}
