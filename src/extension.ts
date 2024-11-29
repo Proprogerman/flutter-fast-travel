@@ -3,6 +3,9 @@ import * as vscode from 'vscode';
 interface DartElement {
 	kind: string;
 	name: string;
+	parameters?: string;
+	typeParameters?: string;
+	returnType?: string;
 	range: {
 		start: { line: number; character: number; };
 		end: { line: number; character: number; };
@@ -17,6 +20,9 @@ interface OutlineNode {
 		end: { line: number; character: number; };
 	};
 }
+
+// Add this as a module-level variable
+let currentArrayContext: { parentName: string, elements: any[] } | null = null;
 
 export async function activate(context: vscode.ExtensionContext) {
 	console.log('Attempting to activate Flutter Code Jumper...');
@@ -286,7 +292,7 @@ async function navigateParams(editor: vscode.TextEditor, privateApi: any, forwar
 	});
 
 	const constructors = allNodes
-		.filter(node =>
+		?.filter(node =>
 			node.element.kind === 'CONSTRUCTOR_INVOCATION' &&
 			isPositionWithinRange(position.line, position.character, node.range)
 		)
@@ -312,558 +318,136 @@ async function navigateParams(editor: vscode.TextEditor, privateApi: any, forwar
 		});
 	}
 
-	// Check if we're inside a children array
-	const isInChildrenArray = allNodes.some(node => {
-		if (node.element.kind === 'NAMED_ARGUMENT' && node.element.name === 'children') {
-			// Find the LIST_LITERAL inside children argument
-			const listLiteral = node.children?.find(child => child.element.kind === 'LIST_LITERAL');
-			if (listLiteral) {
-				// Get the actual array content range (between [ and ])
-				const arrayText = editor.document.getText(new vscode.Range(
-					listLiteral.range.start.line,
-					listLiteral.range.start.character,
-					listLiteral.range.end.line,
-					listLiteral.range.end.character
-				));
+	// Check if we're inside any array
+	const isInArray = allNodes.some(node => {
+		// Check for array-like structures (only if cursor is directly inside the array)
+		const isArrayLike = node.children && node.children.length > 0 &&
+			node.children.every(child =>
+				child.element.kind === 'CONSTRUCTOR_INVOCATION' ||
+				child.element.kind === 'METHOD_INVOCATION' ||
+				child.element.kind === 'IDENTIFIER'
+			) &&
+			isPositionWithinRange(position.line, position.character, node.range) &&
+			// Check if this is the immediate parent (no other arrays in between)
+			!allNodes.some(otherNode =>
+				otherNode !== node &&
+				isPositionWithinRange(position.line, position.character, otherNode.range) &&
+				isPositionWithinRange(otherNode.range.start.line, otherNode.range.start.character, node.range) &&
+				otherNode.children && otherNode.children.length > 0
+			);
 
-				// Find the opening bracket position
-				const openBracketIndex = arrayText.indexOf('[');
-				if (openBracketIndex !== -1) {
-					const arrayStartPos = editor.document.positionAt(
-						editor.document.offsetAt(new vscode.Position(listLiteral.range.start.line, listLiteral.range.start.character)) +
-						openBracketIndex + 1
-					);
-
-					// Create range for array content (between brackets)
-					const arrayContentRange = {
-						start: arrayStartPos,
-						end: new vscode.Position(listLiteral.range.end.line, listLiteral.range.end.character - 1) // -1 to exclude closing bracket
-					};
-
-					console.log('Array content range:', {
-						start: `${arrayContentRange.start.line}:${arrayContentRange.start.character}`,
-						end: `${arrayContentRange.end.line}:${arrayContentRange.end.character}`,
-						position: `${position.line}:${position.character}`
-					});
-
-					// Check if cursor is within array content
-					const isWithinArray =
-						(position.line > arrayContentRange.start.line ||
-							(position.line === arrayContentRange.start.line && position.character >= arrayContentRange.start.character)) &&
-						(position.line < arrayContentRange.end.line ||
-							(position.line === arrayContentRange.end.line && position.character <= arrayContentRange.end.character));
-
-					if (isWithinArray) {
-						// Also check if we're not inside a parameter of a child widget
-						const isInChildParameter = allNodes.some(n =>
-							n.element.kind === 'NAMED_ARGUMENT' &&
-							n.element.name !== 'children' &&
-							isPositionWithinRange(position.line, position.character, n.range)
-						);
-
-						console.log('Within array:', isWithinArray);
-						console.log('In child parameter:', isInChildParameter);
-						return isWithinArray && !isInChildParameter;
-					}
-				}
-			}
+		if (isArrayLike) {
+			parentNode = node;
+			return true;
 		}
 		return false;
 	});
 
-	console.log('Is in children array:', isInChildrenArray);
+	console.log('Is in array:', isInArray);
 
-	if (isInChildrenArray) {
-		// Find the children array node
-		const childrenNode = allNodes.find(node => {
-			if (node.element.kind === 'NAMED_ARGUMENT' && node.element.name === 'children') {
-				const listLiteral = node.children?.find(child => child.element.kind === 'LIST_LITERAL');
-				if (listLiteral) {
-					return isPositionWithinRange(position.line, position.character, listLiteral.range);
-				}
-			}
-			return false;
-		});
+	if (targetNode.element.kind === 'CONSTRUCTOR_INVOCATION' && targetNode.element.parameters) {
+		console.log('Processing constructor parameters');
 
-		if (childrenNode && childrenNode.children) {
-			const listLiteral = childrenNode.children.find(child => child.element.kind === 'LIST_LITERAL');
-			if (listLiteral && listLiteral.children) {
-				console.log('Array elements:', listLiteral.children.map(elem => ({
-					kind: elem.element.kind,
-					name: elem.element.name,
-					range: {
-						start: `${elem.range.start.line}:${elem.range.start.character}`,
-						end: `${elem.range.end.line}:${elem.range.end.character}`
-					}
-				})));
+		// Get parameters from DartElement.parameters
+		const paramsText = targetNode.element.parameters;
+		const params = extractParameters(paramsText, document, new vscode.Position(targetNode.range.start.line, targetNode.range.start.character));
 
-				// Use the full range of each constructor for navigation
-				navigableElements = listLiteral.children.map(elem => {
-					// Find the full constructor range if this is a constructor invocation
-					const constructorNode = allNodes.find(node =>
-						node.element.kind === 'CONSTRUCTOR_INVOCATION' &&
-						node.range.start.line === elem.range.start.line &&
-						node.range.start.character === elem.range.start.character
-					);
+		navigableElements = params.map(param => ({
+			start: new vscode.Position(param.start.line, param.start.character),
+			end: new vscode.Position(param.end.line, param.end.character)
+		}));
 
-					return {
-						start: new vscode.Position(elem.range.start.line, elem.range.start.character),
-						end: new vscode.Position(
-							constructorNode?.range.end.line || elem.range.end.line,
-							constructorNode?.range.end.character || elem.range.end.character
-						)
-					};
-				});
+		console.log('Constructor parameters:', navigableElements);
 
-				// Skip to navigation logic
-				if (navigableElements.length > 0) {
-					let nextIndex = -1;
-
-					if (editor.selection.isEmpty) {
-						const currentElemIndex = navigableElements.findIndex((elem, index) => {
-							const nextElem = index < navigableElements.length - 1 ? navigableElements[index + 1] : null;
-							const rangeEnd = nextElem ? nextElem.start : elem.end;
-
-							const isInRange = position.line >= elem.start.line && position.line <= rangeEnd.line &&
-								(position.line !== elem.start.line || position.character >= elem.start.character) &&
-								(position.line !== rangeEnd.line || position.character <= rangeEnd.character);
-
-							if (isInRange) {
-								console.log(`Cursor is within element ${index}`);
-							}
-							return isInRange;
-						});
-
-						console.log('Current element index:', currentElemIndex);
-
-						if (forward) {
-							if (currentElemIndex !== -1) {
-								nextIndex = (currentElemIndex + 1) % navigableElements.length;
-								console.log('Moving to next element:', nextIndex);
-							} else {
-								nextIndex = navigableElements.findIndex(elem => position.isBefore(elem.start));
-								if (nextIndex === -1) nextIndex = 0;
-								console.log('Moving to nearest next element:', nextIndex);
-							}
-						} else {
-							if (currentElemIndex !== -1) {
-								nextIndex = currentElemIndex;
-								console.log('Selecting current element:', nextIndex);
-							} else {
-								nextIndex = findLastIndex(navigableElements, elem => position.isAfter(elem.end));
-								if (nextIndex === -1) nextIndex = navigableElements.length - 1;
-								console.log('Moving to nearest previous element:', nextIndex);
-							}
-						}
-					} else {
-						// Selection handling with logging
-						const currentIndex = navigableElements.findIndex(elem =>
-							elem.start.isEqual(editor.selection.start) && elem.end.isEqual(editor.selection.end));
-						console.log('Current selection index:', currentIndex);
-
-						if (currentIndex !== -1) {
-							if (forward) {
-								nextIndex = (currentIndex + 1) % navigableElements.length;
-								console.log('Moving selection to next:', nextIndex);
-							} else {
-								nextIndex = (currentIndex - 1 + navigableElements.length) % navigableElements.length;
-								console.log('Moving selection to previous:', nextIndex);
-							}
-						}
-					}
-
-					if (nextIndex !== -1) {
-						const nextElement = navigableElements[nextIndex];
-						console.log('Final navigation target:', {
-							index: nextIndex,
-							start: `${nextElement.start.line}:${nextElement.start.character}`,
-							end: `${nextElement.end.line}:${nextElement.end.character}`
-						});
-
-						editor.selection = new vscode.Selection(nextElement.start, nextElement.start);
-						editor.selection = new vscode.Selection(nextElement.start, nextElement.end);
-						editor.revealRange(new vscode.Range(nextElement.start, nextElement.end));
-					}
-					return; // Exit early after navigation
-				}
-			}
+		if (!navigableElements?.length) {
+			console.log('No navigable parameters found');
+			return;
 		}
-	}
 
-	// If not in children array, continue with parameter navigation
-	if (targetNode.element.kind === 'CONSTRUCTOR_INVOCATION') {
-		console.log('Constructor range:', {
-			start: `${targetNode.range.start.line}:${targetNode.range.start.character}`,
-			end: `${targetNode.range.end.line}:${targetNode.range.end.character}`
-		});
+		const currentIndex = navigableElements.findIndex(elem =>
+			isPositionWithinRange(position.line, position.character, {
+				start: elem.start,
+				end: elem.end
+			})
+		);
 
-		// Get the constructor text
-		const text = editor.document.getText(new vscode.Range(
-			targetNode.range.start.line,
-			targetNode.range.start.character,
-			targetNode.range.end.line,
-			targetNode.range.end.character
-		));
+		console.log('Current index:', currentIndex);
 
-		// Find opening parenthesis
-		const openParenIndex = text.indexOf('(');
-		if (openParenIndex !== -1) {
-			const startPos = editor.document.positionAt(
-				editor.document.offsetAt(new vscode.Position(targetNode.range.start.line, targetNode.range.start.character)) +
-				openParenIndex + 1
-			);
+		const nextIndex = forward ?
+			(currentIndex + 1) % navigableElements.length :
+			(currentIndex === -1 ? navigableElements.length - 1 :
+				(currentIndex - 1 + navigableElements.length) % navigableElements.length);
 
-			let params: { name: string | null; start: vscode.Position; end: vscode.Position }[] = [];
-			let searchStartOffset = editor.document.offsetAt(startPos);
-			let constructorArgs = text.substring(openParenIndex + 1);
+		console.log('Next index:', nextIndex);
 
-			// Parse the constructor arguments
-			let depth = 0;
-			let currentParam = '';
-			let currentParamStart = 0;
-			let nameStart = -1;
-			let valueStart = -1;
-			let paramName: string | null = null;
-			let inString = false;
-			let stringChar = '';
+		const nextElement = navigableElements[nextIndex];
+		console.log('Next element:', nextElement);
 
-			for (let i = 0; i < constructorArgs.length; i++) {
-				const char = constructorArgs[i];
+		// Set the selection from start to end of the next parameter
+		editor.selections = [new vscode.Selection(nextElement.start, nextElement.end)];
+		editor.revealRange(new vscode.Range(nextElement.start, nextElement.end));
 
-				// Handle string literals
-				if ((char === '"' || char === "'") && (i === 0 || constructorArgs[i - 1] !== '\\')) {
-					if (!inString) {
-						inString = true;
-						stringChar = char;
-					} else if (char === stringChar) {
-						inString = false;
-					}
-				}
-
-				// Only count brackets when not in a string
-				if (!inString) {
-					if (char === '(' || char === '{' || char === '[') {
-						depth++;
-					} else if (char === ')' || char === '}' || char === ']') {
-						depth--;
-						if (depth < 0) break; // End of constructor
-					} else if (depth === 0 && char === ':' && valueStart === -1) {
-						paramName = constructorArgs.substring(nameStart, i).trim();
-						valueStart = i + 1;
-					} else if (depth === 0 && char === ',' && !inString) {
-						// Parameter complete
-						if (valueStart === -1) {
-							// Positioned parameter
-							valueStart = currentParamStart;
-							paramName = null;
-						}
-
-						// Find the actual end of the value by trimming trailing whitespace
-						let valueEnd = i;
-						while (valueEnd > valueStart && /\s/.test(constructorArgs[valueEnd - 1])) {
-							valueEnd--;
-						}
-
-						// Find the actual start of the value by trimming leading whitespace
-						while (valueStart < valueEnd && /\s/.test(constructorArgs[valueStart])) {
-							valueStart++;
-						}
-
-						const paramStartPos = editor.document.positionAt(searchStartOffset + valueStart);
-						const paramEndPos = editor.document.positionAt(searchStartOffset + valueEnd);
-
-						params.push({
-							name: paramName,
-							start: paramStartPos,
-							end: paramEndPos
-						});
-
-						// Reset for next parameter
-						currentParamStart = i + 1;
-						nameStart = i + 1;
-						valueStart = -1;
-						paramName = null;
-					}
-				}
-			}
-
-			// Handle the last parameter if it exists
-			if (valueStart !== -1 && depth === 0) {
-				let valueEnd = constructorArgs.length;
-				while (valueEnd > valueStart && /[\s,)]/.test(constructorArgs[valueEnd - 1])) {
-					valueEnd--;
-				}
-
-				while (valueStart < valueEnd && /\s/.test(constructorArgs[valueStart])) {
-					valueStart++;
-				}
-
-				const paramStartPos = editor.document.positionAt(searchStartOffset + valueStart);
-				const paramEndPos = editor.document.positionAt(searchStartOffset + valueEnd);
-
-				params.push({
-					name: paramName,
-					start: paramStartPos,
-					end: paramEndPos
-				});
-			}
-
-			if (params.length > 0) {
-				navigableElements = params;
-				console.log('Using parsed parameters:', params.map(p => ({
-					name: p.name,
-					range: {
-						start: `${p.start.line}:${p.start.character}`,
-						end: `${p.end.line}:${p.end.character}`
-					}
-				})));
-
-				// Skip the rest of the processing and go straight to navigation
-				if (navigableElements.length > 0) {
-					let nextIndex = -1;
-
-					if (editor.selection.isEmpty) {
-						const currentElemIndex = navigableElements.findIndex((elem, index) => {
-							const nextElem = index < navigableElements.length - 1 ? navigableElements[index + 1] : null;
-							const rangeEnd = nextElem ? nextElem.start : elem.end;
-
-							const isInRange = position.line >= elem.start.line && position.line <= rangeEnd.line &&
-								(position.line !== elem.start.line || position.character >= elem.start.character) &&
-								(position.line !== rangeEnd.line || position.character <= rangeEnd.character);
-
-							if (isInRange) {
-								console.log(`Cursor is within element ${index}`);
-							}
-							return isInRange;
-						});
-
-						console.log('Current element index:', currentElemIndex);
-
-						if (forward) {
-							if (currentElemIndex !== -1) {
-								nextIndex = (currentElemIndex + 1) % navigableElements.length;
-								console.log('Moving to next element:', nextIndex);
-							} else {
-								nextIndex = navigableElements.findIndex(elem => position.isBefore(elem.start));
-								if (nextIndex === -1) nextIndex = 0;
-								console.log('Moving to nearest next element:', nextIndex);
-							}
-						} else {
-							if (currentElemIndex !== -1) {
-								nextIndex = currentElemIndex;
-								console.log('Selecting current element:', nextIndex);
-							} else {
-								nextIndex = findLastIndex(navigableElements, elem => position.isAfter(elem.end));
-								if (nextIndex === -1) nextIndex = navigableElements.length - 1;
-								console.log('Moving to nearest previous element:', nextIndex);
-							}
-						}
-					} else {
-						// Selection handling with logging
-						const currentIndex = navigableElements.findIndex(elem =>
-							elem.start.isEqual(editor.selection.start) && elem.end.isEqual(editor.selection.end));
-						console.log('Current selection index:', currentIndex);
-
-						if (currentIndex !== -1) {
-							if (forward) {
-								nextIndex = (currentIndex + 1) % navigableElements.length;
-								console.log('Moving selection to next:', nextIndex);
-							} else {
-								nextIndex = (currentIndex - 1 + navigableElements.length) % navigableElements.length;
-								console.log('Moving selection to previous:', nextIndex);
-							}
-						}
-					}
-
-					if (nextIndex !== -1) {
-						const nextElement = navigableElements[nextIndex];
-						console.log('Final navigation target:', {
-							index: nextIndex,
-							start: `${nextElement.start.line}:${nextElement.start.character}`,
-							end: `${nextElement.end.line}:${nextElement.end.character}`
-						});
-
-						editor.selection = new vscode.Selection(nextElement.start, nextElement.start);
-						editor.selection = new vscode.Selection(nextElement.start, nextElement.end);
-						editor.revealRange(new vscode.Range(nextElement.start, nextElement.end));
-					}
-					return; // Exit early after navigation
-				}
-			}
-		}
-	}
-
-	if (!editor.selection.isEmpty) {
-		console.log('Has selection:', {
-			start: editor.selection.start,
-			end: editor.selection.end
-		});
-		const exactNode = findExactNode(outline, editor.selection.start, editor.selection.end);
-		if (exactNode) {
-			parentNode = findParentNodeExcludingCurrent(outline, exactNode) || currentNode;
-			console.log('Found exact parent node:', {
-				kind: parentNode.element.kind,
-				name: parentNode.element.name
-			});
-		}
-	}
-
-	console.log('Parent node kind:', parentNode.element.kind);
-	console.log('Parent node children:', parentNode.children?.map(child => ({
-		kind: child.element.kind,
-		name: child.element.name,
-		range: child.range
-	})));
-
-	if (parentNode.children) {
-		switch (parentNode.element.kind) {
-			case 'CONSTRUCTOR_INVOCATION':
-				console.log('Processing widget parameters');
-				// Get all direct children
-				const allChildren = parentNode.children || [];
-				console.log('All children:', allChildren.map(c => ({
-					kind: c.element.kind,
-					name: c.element.name
-				})));
-
-				// First try to find direct parameters
-				let parameters = allChildren.filter(child =>
-					child.element.kind === 'NAMED_ARGUMENT' ||
-					child.element.kind === 'ARGUMENT'
-				);
-
-				// If no direct parameters found, try to find them in child nodes
-				if (parameters.length === 0) {
-					parameters = allChildren.flatMap(child =>
-						child.children?.filter(grandChild =>
-							grandChild.element.kind === 'NAMED_ARGUMENT' ||
-							grandChild.element.kind === 'ARGUMENT'
-						) || []
-					);
-				}
-
-				console.log('Found parameters:', parameters.map(p => ({
-					kind: p.element.kind,
-					name: p.element.name
-				})));
-
-				navigableElements = parameters.map(child => {
-					const elem = {
-						start: new vscode.Position(child.range.start.line, child.range.start.character),
-						end: new vscode.Position(child.range.end.line, child.range.end.character)
-					};
-					console.log(`Mapped element: ${child.element.name || ''}`, elem);
-					return elem;
-				});
-				break;
-			case 'LIST_LITERAL':
-				console.log('Processing array elements');
-				navigableElements = parentNode.children.map(child => ({
-					start: new vscode.Position(child.range.start.line, child.range.start.character),
-					end: new vscode.Position(child.range.end.line, child.range.end.character)
-				}));
-				break;
-			case 'CLASS_DECLARATION':
-				// Class members
-				navigableElements = parentNode.children
-					.filter(child => ['FIELD', 'METHOD', 'CONSTRUCTOR'].includes(child.element.kind))
-					.map(child => ({
-						start: new vscode.Position(child.range.start.line, child.range.start.character),
-						end: new vscode.Position(child.range.end.line, child.range.end.character)
-					}));
-				break;
-			case 'COMPILATION_UNIT':
-				// File-level declarations
-				navigableElements = parentNode.children
-					.filter(child => ['CLASS_DECLARATION', 'METHOD_DECLARATION', 'FIELD_DECLARATION'].includes(child.element.kind))
-					.map(child => ({
-						start: new vscode.Position(child.range.start.line, child.range.start.character),
-						end: new vscode.Position(child.range.end.line, child.range.end.character)
-					}));
-				break;
-		}
-	}
-
-	console.log('Navigable elements:', navigableElements.map((elem, idx) => ({
-		index: idx,
-		start: `${elem.start.line}:${elem.start.character}`,
-		end: `${elem.end.line}:${elem.end.character}`
-	})));
-
-	if (navigableElements.length === 0) {
-		console.log('No navigable elements found');
 		return;
 	}
 
-	let nextIndex = -1;
+	if (isInArray) {
+		console.log('Processing array navigation');
 
-	if (editor.selection.isEmpty) {
-		const currentElemIndex = navigableElements.findIndex((elem, index) => {
-			const nextElem = index < navigableElements.length - 1 ? navigableElements[index + 1] : null;
-			const rangeEnd = nextElem ? nextElem.start : elem.end;
+		// Get array elements from parent node's children
+		navigableElements = parentNode.children?.map((child, index) => ({
+			index,
+			start: new vscode.Position(child.range.start.line, child.range.start.character),
+			end: new vscode.Position(child.range.end.line, child.range.end.character)
+		})) || [];
 
-			const isInRange = position.line >= elem.start.line && position.line <= rangeEnd.line &&
-				(position.line !== elem.start.line || position.character >= elem.start.character) &&
-				(position.line !== rangeEnd.line || position.character <= rangeEnd.character);
+		console.log('Array elements:', navigableElements);
 
-			if (isInRange) {
-				console.log(`Cursor is within element ${index}`);
-			}
-			return isInRange;
-		});
-
-		console.log('Current element index:', currentElemIndex);
-
-		if (forward) {
-			if (currentElemIndex !== -1) {
-				nextIndex = (currentElemIndex + 1) % navigableElements.length;
-				console.log('Moving to next element:', nextIndex);
-			} else {
-				nextIndex = navigableElements.findIndex(elem => position.isBefore(elem.start));
-				if (nextIndex === -1) nextIndex = 0;
-				console.log('Moving to nearest next element:', nextIndex);
-			}
-		} else {
-			if (currentElemIndex !== -1) {
-				nextIndex = currentElemIndex;
-				console.log('Selecting current element:', nextIndex);
-			} else {
-				nextIndex = findLastIndex(navigableElements, elem => position.isAfter(elem.end));
-				if (nextIndex === -1) nextIndex = navigableElements.length - 1;
-				console.log('Moving to nearest previous element:', nextIndex);
-			}
+		if (!navigableElements?.length) {
+			console.log('No navigable elements found');
+			return;
 		}
-	} else {
-		// Selection handling with logging
+
 		const currentIndex = navigableElements.findIndex(elem =>
-			elem.start.isEqual(editor.selection.start) && elem.end.isEqual(editor.selection.end));
-		console.log('Current selection index:', currentIndex);
+			isPositionWithinRange(position.line, position.character, {
+				start: elem.start,
+				end: elem.end
+			})
+		);
 
-		if (currentIndex !== -1) {
-			if (forward) {
-				nextIndex = (currentIndex + 1) % navigableElements.length;
-				console.log('Moving selection to next:', nextIndex);
-			} else {
-				nextIndex = (currentIndex - 1 + navigableElements.length) % navigableElements.length;
-				console.log('Moving selection to previous:', nextIndex);
-			}
-		}
-	}
+		console.log('Current index:', currentIndex);
 
-	if (nextIndex !== -1) {
+		const nextIndex = forward ?
+			(currentIndex + 1) % navigableElements.length :
+			(currentIndex === -1 ? navigableElements.length - 1 :
+				(currentIndex - 1 + navigableElements.length) % navigableElements.length);
+
+		console.log('Next index:', nextIndex);
+
 		const nextElement = navigableElements[nextIndex];
-		console.log('Final navigation target:', {
-			index: nextIndex,
-			start: `${nextElement.start.line}:${nextElement.start.character}`,
-			end: `${nextElement.end.line}:${nextElement.end.character}`
-		});
+		console.log('Next element:', nextElement);
 
-		editor.selection = new vscode.Selection(nextElement.start, nextElement.start);
-		editor.selection = new vscode.Selection(nextElement.start, nextElement.end);
+		// Set the selection from start to end of the next element
+		editor.selections = [new vscode.Selection(nextElement.start, nextElement.end)];
 		editor.revealRange(new vscode.Range(nextElement.start, nextElement.end));
-	} else {
-		console.log('No navigation target found');
+
+		return;
 	}
+}
+
+function extractParameters(paramsText: string, document: vscode.TextDocument, startPosition: vscode.Position): { start: vscode.Position, end: vscode.Position }[] {
+	const params: { start: vscode.Position, end: vscode.Position }[] = [];
+	const regex = /(\w+)\s*:\s*([^,]+)(,|$)/g;
+	let match;
+	while ((match = regex.exec(paramsText)) !== null) {
+		const paramName = match[1];
+		const paramValue = match[2];
+		const startOffset = document.offsetAt(startPosition) + match.index;
+		const endOffset = startOffset + match[0].length;
+		const start = document.positionAt(startOffset);
+		const end = document.positionAt(endOffset);
+		params.push({ start, end });
+	}
+	return params;
 }
 
 function findNextCommaPosition(document: vscode.TextDocument, pos: vscode.Position): vscode.Position | null {
